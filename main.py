@@ -17,7 +17,8 @@ import matplotlib
 from src.data_loader import load_question, list_questions
 from src.model import Results, model_for_case
 from src.plotting import (plot_disutility_sweep, plot_duals, plot_inputs, plot_load_comparison,
-                          plot_scenario_comparison, plot_schedule)
+                          plot_scenario_comparison, plot_schedule,
+                          plot_schedule_q3_comparison, plot_duals_q3)
 from src.scenarios import scale_prices, scale_pv, set_disutility, set_tariffs
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -30,16 +31,30 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
 
     try:
         # the class registered for this case
-        model = model_for_case(question)(data).build()
+        ModelClass = model_for_case(question)
+        model = ModelClass(data).build()
         results = model.solve()
     except NotImplementedError as e:
         print(f"[skipped] {e}")
         return None
 
+    results_q2c = None
+    if "Q3" in question:
+        print("--> Q3 question detected, solving Q2.(c) (without E_min constraint) simultaneously for comparison curves...")
+        model_q2c = Q2QuadraticModel(data).build()
+        results_q2c = model_q2c.solve()
+        print(f"Q2.(c) solved. Unconstrained energy consumption: {results_q2c.hourly['load'].sum():.2f} kWh (Q3 mandatory constraint is {data.min_daily_energy_kWh:.2f} kWh)")
+
     print(results, "\n")
     results.save(out)
-    plot_schedule(results, data, save_to=out / "schedule.png")
-    plot_duals(results, data, save_to=out / "duals.png")
+
+    if "Q3" in question and results_q2c is not None:
+        plot_schedule_q3_comparison(results, results_q2c, data, save_to=out / "schedule.png")
+        plot_duals_q3(results, data, save_to=out / "duals.png")
+    else:
+        plot_schedule(results, data, save_to=out / "schedule.png")
+        plot_duals(results, data, save_to=out / "duals.png")
+
     if show:
         matplotlib.pyplot.show()
     return results
@@ -119,7 +134,7 @@ def run_q2b_sweep(out: Path):
     import numpy as np
     base = load_question('Q2_linear')
     grid = np.round(np.arange(0.05, (base.energy_price +
-                    base.import_tariff).max() + 0.35, 0.05), 2)
+                                    base.import_tariff).max() + 0.35, 0.05), 2)
     return _disutility_sweep('Q2_linear', 'linear', grid, out, xlabel='c_L [DKK/kWh]')
 
 
@@ -182,6 +197,23 @@ def run_q2d_comparison(out: Path):
     print(f"\nComparison written to {out}")
     return df
 
+from src.model import Q2QuadraticModel
+from src.q3_model import ModelQ3
+
+def run_q3_analysis(question: str = "Q3_base", out: Path = RESULTS_DIR / "Q3_base"):
+    out.mkdir(parents=True, exist_ok=True)
+    data = load_question(question)
+    
+    res_q2c = Q2QuadraticModel(data).build().solve()
+    
+    res_q3 = ModelQ3(data).build().solve()
+    
+    res_q3.save(out)
+
+    plot_schedule_q3_comparison(res_q3, res_q2c, data, save_to=out / "schedule.png")
+    plot_duals_q3(res_q3, data, save_to=out / "duals.png")
+    
+    print(f"Q3 analysis completed, figures saved to: {out}")
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -205,19 +237,7 @@ def main() -> None:
     if not args.show:
         matplotlib.use("Agg")
 
-    if args.sweep_cl:
-        run_q2b_sweep(RESULTS_DIR / "Q2_linear")
-        return
-    if args.sweep_cq:
-        run_q2c_sweep(RESULTS_DIR / "Q2_quadratic")
-        return
-    if args.compare_q2:
-        run_q2d_comparison(RESULTS_DIR / "Q2_comparison")
-        return
-
     base = run_base_case(args.question, out, args.show)
-    if args.scenarios and base is not None:
-        run_scenarios(args.question, out)
     print(f"\nOutputs written to {out}")
 
 
