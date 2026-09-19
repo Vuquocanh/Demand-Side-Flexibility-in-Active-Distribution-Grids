@@ -27,7 +27,8 @@ def scale_prices(data: InputData, factor: float, keep_mean: bool = False) -> Inp
     mean is scaled, which isolates the effect of price variability from the effect of price level."""
     p = data.energy_price
     new_p = p.mean() + factor * (p - p.mean()) if keep_mean else factor * p
-    return replace(data, energy_price=np.clip(new_p, 0.0, None))   # prices stay non-negative
+    # prices stay non-negative
+    return replace(data, energy_price=np.clip(new_p, 0.0, None))
 
 
 def shift_prices(data: InputData, delta: float) -> InputData:
@@ -54,6 +55,16 @@ def scale_pv(data: InputData, factor: float) -> InputData:
     """Scale the available PV production (e.g. 0.5 for a cloudy day, 0.0 for no PV)."""
     profile = np.clip(data.pv_profile * factor, 0.0, 1.0)
     return replace(data, pv_profile=profile, pv_available=data.pv_max_kW * profile)
+
+
+def set_disutility(data: InputData, linear: float | None = None, quadratic: float | None = None) -> InputData:
+    """Override the linear and/or quadratic disutility coefficient (the sweeps of
+    Questions 2.(b).iv and 2.(c).iv)."""
+    return replace(
+        data,
+        linear_disutility=data.linear_disutility if linear is None else linear,
+        quadratic_disutility=data.quadratic_disutility if quadratic is None else quadratic,
+    )
 
 
 def set_load_preferences(

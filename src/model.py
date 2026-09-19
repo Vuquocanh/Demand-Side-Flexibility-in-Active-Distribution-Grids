@@ -1,6 +1,15 @@
 """Optimisation model of a single flexible consumer, implemented with gurobipy.
 
-The class below separates the three steps you will repeat for every question:
+Here, we will use one class for each question, sharing a common skeleton.
+
+    FlexibleConsumerModel   -> for Q1, price-elastic consumption. we MAXIMIZES daily surplus
+    Q2LinearModel           -> for Q2b, linear disutility |l - ref|, we MINIMIZES cost + disutility
+    Q3QuadraticModel        -> for Q2c, quadratic disutility, we MINIMIZES cost + disutility
+
+Each model has its own natural optimization direction, and will be stated in the class docstring, because it matters when interpreting
+the duals. 
+
+Usage (unchange from the course's template):
 
     model = FlexibleConsumerModel(data)   # 1. hand over the input data
     model.build()                         # 2. declare variables, objective, constraints
@@ -58,13 +67,19 @@ class Results:
                 f"status    : {self.status}\nobjective : {self.objective:.4f} DKK\n")
             for k, v in self.duals.items():
                 f.write(f"dual[{k}] : {v:.4f}\n")
+            for k, v in self.meta.get("objective_terms", {}).items():
+                f.write(f"{k:<16}: {v:.4f} DKK\n")
 
     def __str__(self) -> str:
         cols = [c for c in self.hourly.columns if not c.startswith("dual_")]
+        terms = self.meta.get("objective_terms", {})
         return (
-            f"status: {self.status} | objective: {self.objective:.2f} DKK\n"
-            f"daily totals (kWh): " + ", ".join(
-                f"{c}={self.hourly[c].sum():.1f}" for c in cols if c in ("import", "export", "load", "pv"))
+            f"status: {self.status} | objective: {self.objective:.2f} DKK"
+            + (" | " + ", ".join(f"{k}={v:.2f}" for k,
+               v in terms.items()) if terms else "")
+            + "\ndaily totals (kWh): "
+            + ", ".join(f"{c}={self.hourly[c].sum():.1f}" for c in cols if c in (
+                "import", "export", "load", "pv"))
             + (f"\nduals: {self.duals}" if self.duals else "")
         )
 
@@ -75,7 +90,16 @@ def _dual(c) -> float:
 
 
 class FlexibleConsumerModel:
-    """Consumption problem of one consumer over a 24-hour horizon (Question 1); extend it for Questions 2 and 3."""
+    """Consumption problem of one consumer over a 24-hour horizon (Question 1); extend it for Questions 2 and 3.
+
+        Direction: MAXIMIZE the daily surplus
+        sum_t [ u_L * load_t - c_PV * pv_t - pi_imp_t * import_t + pi_exp_t * export_t ]
+        with effective prices pi_imp_t = p_t + tau_imp and pi_exp_t = p_t - tau_exp
+        (see drafts/Q1a_formulation.md, eqs. (1a)-(1f)).
+
+        Subclass and override :meth:`build` (reusing the ``_add_common_*`` helpers) for the
+        other questions.
+    """
 
     def __init__(self, data: InputData, name: str = "flexible_consumer", verbose: bool = False):
         self.data = data
@@ -91,86 +115,90 @@ class FlexibleConsumerModel:
         # objective components by name (values read from here after solve)
         self.expr: dict[str, gp.LinExpr | gp.QuadExpr] = {}
 
-    # ------------------------------------------------------------------ 2. build
-    def build(self) -> "FlexibleConsumerModel":
-        """
-        Question 1: maximize the daily surplus of the price-elastic consumer.
-        max sum_t [u_Load * load_t - c_PV * pv_t - pi_imp_t * import_t + pi_exp_t * export_t]
-        s.t.
-        hourly balance, PV availability, load bounds (all bounds as explicit constraints to get duals).
-        """
+    # ------------------------------------------------------------------ shared helpers
+    @property
+    def price_import(self) -> np.ndarray:
+        """Effective import price pi_imp_t = p_t + tau_imp (DKK/kWh)."""
+        return self.data.energy_price + self.data.import_tariff
 
+    @property
+    def price_export(self) -> np.ndarray:
+        """Effective export price pi_exp_t = p_t - tau_exp (DKK/kWh)."""
+        return self.data.energy_price - self.data.export_tariff
+
+    def _add_common_variables(self) -> None:
+        """Hourly variables shared by every question: load, pv, import, export (kWh/h).
+
+        ``load`` is declared free (lb=-GRB.INFINITY): its lower bound is the explicit
+        ``load_min`` constraint, and it must not exist twice. With the gurobipy default
+        ``lb=0`` the same bound would be both a variable bound and a constraint, the
+        multiplier could split arbitrarily between RC and Pi (degenerate), and the
+        reported dual of ``load_min`` was 0. pv/import/export keep the default lb=0:
+        their non-negativity is not duplicated by any explicit constraint.
+        """
+        m, T = self.m, self.T
+        # consumption (bounds as explicit constraints to get duals)
+        self.var['load'] = m.addVars(T, lb=-GRB.INFINITY, name='load')
+        # PV production
+        self.var['pv'] = m.addVars(T, name='pv')
+        self.var['import'] = m.addVars(
+            T, name='import')                # grid import
+        self.var['export'] = m.addVars(
+            T, name='export')                # grid export
+
+    def _add_common_constraints(self) -> None:
+        """Constraints shared by every question: balance (1b), PV limit (1c), load bounds (1d)-(1e).
+
+        All bounds are explicit constraints so that their duals are reported.
+        """
         d, m, T = self.data, self.m, self.T
+        load, pv = self.var['load'], self.var['pv']
+        imp, exp = self.var['import'], self.var['export']
 
-        # Effective prices (DKK/kWh): what the consumer actually pays / receives
-        pi_imp = d.energy_price + d.import_tariff
-        pi_exp = d.energy_price - d.export_tariff
+        # 1b: hourly energy balance (sources = sinks), arranged sinks - sources == 0; dual = lambda_t
+        self.con['balance'] = m.addConstrs(
+            (load[t] + exp[t] - pv[t] - imp[t] == 0 for t in T), name='balance')
+        # 1c: PV availability; dual = mu_pv_max_t
+        self.con['pv_max'] = m.addConstrs(
+            (pv[t] <= d.pv_available[t] for t in T), name='pv_max')
+        # 1d - 1e hourly load bounds. duals = mu_load_min_t, mu_load_max_t
+        # load_min arranged as L_min - load <= 0 so its dual comes out non-negative
+        self.con['load_min'] = m.addConstrs(
+            (d.load_min_kWh - load[t] <= 0 for t in T), name='load_min')
+        self.con['load_max'] = m.addConstrs(
+            (load[t] <= d.load_max_kWh for t in T), name='load_max')
 
-        # --- Decision variables --------------------------------------------------------
-        # TODO: identify and declare the decision variables of your formulation.
-        # Store every variable family in self.var["<name>"]: solve() then returns its hourly
-        # values automatically as a column of results.hourly.
-        # Pattern for hourly variables (one per hour):
-        #   self.var["<name>"] = m.addVars(T, lb=-GRB.INFINITY, vtype=GRB.CONTINUOUS, name="<name>")
-        # Pattern for a single (daily) variable:
-        #   self.var["<name>"] = m.addVar(lb=-GRB.INFINITY, vtype=GRB.CONTINUOUS, name="<name>")
-        # Notes:
-        # * gurobipy indexes the names automatically: name="<name>" in addVars(T, ...) creates
-        #   <name>[0], <name>[1], ..., <name>[23] - no need to build per-hour names yourself.
-        # * vtype: the same format takes GRB.BINARY or GRB.INTEGER if you ever need them (the
-        #   problem then becomes a MILP and dual values are no longer defined; solve() skips them).
-        # * lb defaults to 0 in gurobipy: a free variable needs an explicit lb=-GRB.INFINITY, and
-        #   a bound you want a dual for must be an explicit constraint, not lb=/ub= (see the README).
-        # * naming the families "import", "export", "load", "pv" makes the standard plots of
-        #   src/plotting.py work out of the box.
-        self.var["load"] = m.addVars(T, lb= -GRB.INFINITY, name="load")
-        self.var["pv"] = m.addVars(T, name="pv")
-        self.var["import"] = m.addVars(T, name="import")
-        self.var["export"] = m.addVars(T, name="export")
-        load, pv = self.var["load"], self.var["pv"]
-        imp, exp = self.var["import"], self.var["export"]
+    def _money_terms(self, t: int) -> gp.LinExpr:
+        """PV cost + import cost - export revenue in hour t (the grid/PV part of every objective)."""
+        return (self.data.pv_marginal_cost * self.var['pv'][t]
+                + self.price_import[t] * self.var['import'][t]
+                - self.price_export[t] * self.var['export'][t])
 
-        # --- Objective ---------------------------------------------------------------
-        # TODO: express the objective function and its direction (GRB.MINIMIZE or GRB.MAXIMIZE):
-        #   m.setObjective(gp.quicksum(<expression in t> for t in T), <direction>)
-        # The input-data attributes (with units) are documented in src/data_loader.py (InputData).
-        utility = gp.quicksum(d.consumption_utility * load[t] for t in T)
-        procurement_cost = gp.quicksum(d.pv_marginal_cost * pv[t] +  
-                                         pi_imp[t] * imp[t] - pi_exp[t] * exp[t] for t in T)
-        self.expr["utility"] = utility
-        self.expr["procurement_cost"] = procurement_cost
+    # ------------------------------------------------------------------ 2. build
+
+    def build(self) -> "FlexibleConsumerModel":
+        """Question 1 model: maximize daily surplus subject to (1b)-(1f)."""
+        d, m, T = self.data, self.m, self.T
+        if d.consumption_utility is None:
+            raise ValueError(f"Case {d.question!r} has no consumption utility: "
+                             "use the model class of its own question, not the Question 1 model.")
+        self._add_common_variables()
+        # (1a): surplus = utility of consumption - (PV cost + import cost - export revenue)
+        self.expr["utility"] = gp.quicksum(
+            d.consumption_utility * self.var["load"][t] for t in T)
+        self.expr["procurement_cost"] = gp.quicksum(
+            self._money_terms(t) for t in T)
         m.setObjective(
-            utility - procurement_cost,
-            GRB.MAXIMIZE
-        )
-
-        # --- Constraints -------------------------------------------------------------
-        # TODO: add the constraints of your formulation.
-        # Pattern for hourly constraints (one per hour, duals returned as a 24-vector; names are
-        # indexed automatically, like for the variables):
-        #   self.con["<name>"] = m.addConstrs(
-        #       (<lhs expression> - <rhs expression> <= 0 for t in T), name="<name>")
-        # Pattern for a single constraint (dual returned as a scalar):
-        #   self.con["<name>"] = m.addConstr(<lhs expression> - <rhs expression> <= 0, name="<name>")
-
-        # Hourly energy balance (sources = sinks), dual = lambda_t
-        self.con["balance"] = m.addConstrs(
-            (load[t] + exp[t] - pv[t] - imp[t] == 0 for t in T), name="balance" # Follow the pattern above to get duals of equality constraints
-        )
-        # PV availability dual = mu_pv_max_t
-        self.con["pv_max"] = m.addConstrs(
-            (pv[t] <= d.pv_available[t] for t in T), name="pv_max"
-        )
-        # Hourly load bounds as explicit constraints (duals), not as variable bounds
-        self.con["load_min"] = m.addConstrs(
-            (d.load_min_kWh - load[t] <= 0  for t in T), name="load_min" # This expression is to let dual variables be positive
-        )
-        self.con["load_max"] = m.addConstrs(
-            (load[t] <= d.load_max_kWh for t in T), name="load_max"
-        )
-
+            self.expr["utility"] - self.expr["procurement_cost"], GRB.MAXIMIZE)
+        self._add_common_constraints()
         m.update()
         return self
+
+    # -------------------------------------------------- objective decomposition
+    def objective_terms(self) -> dict[str, float]:
+        """Optimal value of every named objective component in ``self.expr``
+        (requirement of Question 1.(e): procurement cost and total utility)."""
+        return {name: e.getValue() for name, e in self.expr.items()}
 
     # ------------------------------------------------------------------ 3. solve
     def solve(self) -> Results:
@@ -216,14 +244,107 @@ class FlexibleConsumerModel:
                 # No duals available (e.g. model with integer variables)
                 pass
 
+        meta: dict = {"scalar_variables": scalars}
+        try:
+            meta["objective_terms"] = self.objective_terms()
+        except Exception:
+            pass
+
         return Results(
             question=d.question,
             status=status,
             objective=self.m.ObjVal,
             hourly=hourly,
             duals=duals,
-            meta={"scalar_variables": scalars},
+            meta=meta,
         )
+
+
+class Q2LinearModel(FlexibleConsumerModel):
+    """Question 2.(b): linear disutility of the absolute deviation from the reference profile.
+
+    Direction: MINIMIZE  sum_t [ c_L * s_t + c_PV * pv_t + pi_imp_t * import_t - pi_exp_t * export_t ]
+    where the auxiliary variable s_t >= |load_t - ref_t| is enforced by the two linear
+    constraint families ``dev_up``/``dev_dn`` and pushed down to equality at the optimum
+    by its positive objective coefficient (LP reformulation, drafts/Q2b eqs. (5a)-(5d)).
+    """
+
+    def build(self) -> "Q2LinearModel":
+        d, m, T = self.data, self.m, self.T
+        if d.reference_load is None or d.linear_disutility is None:
+            raise ValueError(f"Case {d.question!r} has no reference profile / linear disutility "
+                             "coefficient: use the model class of its own question.")
+        ref, c_L = d.reference_load, d.linear_disutility
+
+        self._add_common_variables()
+        # s_t >= 0: deviation magnitude |load_t - ref_t| after reformulation, kWh/h
+        # (default lb=0 kept: this non-negativity is part of the reformulation, no dual needed)
+        self.var["deviation"] = m.addVars(T, name="deviation")
+
+        # (5a): linear disutility + procurement cost, minimized
+        self.expr["disutility"] = gp.quicksum(
+            c_L * self.var["deviation"][t] for t in T)
+        self.expr["procurement_cost"] = gp.quicksum(
+            self._money_terms(t) for t in T)
+        m.setObjective(
+            self.expr["disutility"] + self.expr["procurement_cost"], GRB.MINIMIZE)
+
+        self._add_common_constraints()
+        # (5b)-(5c): the auxiliary bounds the deviation from above in both signs,
+        # arranged <lhs> - s_t <= 0
+        self.con["dev_up"] = m.addConstrs(
+            (self.var["load"][t] - ref[t] - self.var["deviation"][t] <= 0 for t in T), name="dev_up")
+        self.con["dev_dn"] = m.addConstrs(
+            (ref[t] - self.var["load"][t] - self.var["deviation"][t] <= 0 for t in T), name="dev_dn")
+        m.update()
+        return self
+
+
+class Q2QuadraticModel(FlexibleConsumerModel):
+    """Question 2.(c): strictly convex quadratic disutility of the deviation.
+
+    Direction: MINIMIZE  sum_t [ c_Q * (load_t - ref_t)^2 + c_PV * pv_t
+                                 + pi_imp_t * import_t - pi_exp_t * export_t ]
+    The quadratic term sits in the objective only (a QP: quadratic objective, linear
+    constraints), so the duals of the linear constraints are reported as usual.
+    """
+
+    def build(self) -> "Q2QuadraticModel":
+        d, m, T = self.data, self.m, self.T
+        if d.reference_load is None or d.quadratic_disutility is None:
+            raise ValueError(f"Case {d.question!r} has no reference profile / quadratic disutility "
+                             "coefficient: use the model class of its own question.")
+        ref, c_Q = d.reference_load, d.quadratic_disutility
+
+        self._add_common_variables()
+        self.expr["disutility"] = gp.quicksum(
+            c_Q * (self.var["load"][t] - ref[t]) * (self.var["load"][t] - ref[t]) for t in T)
+        self.expr["procurement_cost"] = gp.quicksum(
+            self._money_terms(t) for t in T)
+        m.setObjective(
+            self.expr["disutility"] + self.expr["procurement_cost"], GRB.MINIMIZE)
+        self._add_common_constraints()
+        m.update()
+        return self
+
+
+#: Which model class solves which data case (used by main.py). Q3 classes to be added.
+MODEL_BY_CASE: dict[str, type[FlexibleConsumerModel]] = {
+    "Q1_caseA": FlexibleConsumerModel,
+    "Q1_caseB": FlexibleConsumerModel,
+    "Q2_linear": Q2LinearModel,
+    "Q2_quadratic": Q2QuadraticModel,
+}
+
+
+def model_for_case(question: str) -> type[FlexibleConsumerModel]:
+    """Model class registered for a data case, with a clear error for future cases."""
+    try:
+        return MODEL_BY_CASE[question]
+    except KeyError:
+        raise NotImplementedError(
+            f"No model implemented yet for case {question!r}. "
+            f"Implemented: {sorted(MODEL_BY_CASE)}") from None
 
 
 _STATUS = {
