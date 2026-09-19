@@ -204,3 +204,70 @@ def plot_scenario_comparison(
     ax.set(ylabel=ylabel, title=f"Scenario comparison - {metric}")
     ax.tick_params(axis="x", rotation=20)
     return _finish(fig, save_to)
+
+def plot_schedule_q3_comparison(results_q3, results_q2c, data, save_to=None):
+    fig, ax1 = plt.subplots(figsize=(10, 4.5), dpi=150)
+    
+    h = results_q3.hourly          
+    hours = h.index
+
+    ax1.bar(hours, h["load"], width=0.4, label="Q3 load (with $E_{\min}$)", color="#5B9BD5", alpha=0.7)
+
+    if "reference_load" in h.columns:
+        ax1.plot(hours, h["reference_load"], linestyle=":", color="#1F4E79", linewidth=2, label="reference load ($\ell_t^{ref}$)")
+
+    if results_q2c is not None:
+        ax1.plot(
+            hours, 
+            results_q2c.hourly["load"], 
+            linestyle="--", 
+            color="#ED7D31", 
+            linewidth=2, 
+            marker="s", 
+            markersize=3.5, 
+            label="Q2.(c) load (unconstrained)"
+        )
+
+    if "import" in h.columns and "export" in h.columns:
+        ax1.plot(hours, h["import"] - h["export"], marker="o", color="black", linewidth=1.2, label="net import (+) / export (-)")
+
+    ax2 = ax1.twinx()
+    ax2.plot(hours, data.energy_price, color="#C00000", linestyle="-", label="energy price")
+    ax2.set_ylabel("DKK/kWh", color="#C00000")
+
+    ax1.set_xlabel("hour")
+    ax1.set_ylabel("kWh/h")
+    ax1.set_title(f"Optimal schedule - {results_q3.question} (cost {results_q3.objective:.1f} DKK)")  
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3)
+
+    return _finish(fig, save_to)
+
+
+def plot_duals_q3(results_q3, data, save_to=None):
+    fig, ax = plt.subplots(figsize=(10, 4), dpi=150)
+    h = results_q3.hourly          
+    hours = h.index
+
+    if "dual_balance" in h.columns:
+        ax.plot(hours, h["dual_balance"], label="dual balance ($\lambda_t$)", color="#1F77B4", linewidth=1.5)
+    if "dual_pv_max" in h.columns:
+        ax.plot(hours, h["dual_pv_max"], label="dual pv_max", color="#FF7F0E", linewidth=1.5)
+
+    p_imp = data.energy_price + data.import_tariff
+    p_exp = data.energy_price - data.export_tariff
+    ax.plot(hours, p_imp, linestyle="--", color="gray", alpha=0.6, label="price + import tariff")
+    ax.plot(hours, p_exp, linestyle=":", color="gray", alpha=0.6, label="price - export tariff")
+
+    if "min_daily_energy" in results_q3.duals:
+        mu_val = abs(results_q3.duals["min_daily_energy"]) 
+        ax.axhline(y=mu_val, color="red", linestyle="--", linewidth=1.5, label=f"$\mu$ (min energy dual = {mu_val:.2f} DKK/kWh)")
+
+    ax.set_xlabel("hour")
+    ax.set_ylabel("DKK/kWh")
+    ax.set_title(f"Dual variables - {results_q3.question}") 
+    ax.legend(loc="upper right", fontsize=8.5)
+
+    return _finish(fig, save_to)
