@@ -1,273 +1,407 @@
-"""Matplotlib figures for the input data and the optimisation results.
+"""Entry point: load one question's data, build and solve the model, save results and figures.
 
-Every function returns the ``Figure`` and optionally saves it, so the same code works in a
-script (``python main.py``) and in a notebook (``plot_schedule(results, data);``).
+    python main.py                          # base case of Q1_caseA
+    python main.py --question Q2_linear     # another case
+    python main.py --scenarios              # also run the example sensitivity scenarios
+
+Results (CSV, TXT, PNG) are written to ``results/<question>/``. Extend ``run_scenarios``
+with your own scenarios, or add a new function per question, as your analysis grows.
 """
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
+import matplotlib
 
-from .data_loader import InputData
-from .model import Results
+from src.data_loader import load_question, list_questions
+from src.model import Results, model_for_case
+from src.plotting import (plot_disutility_sweep, plot_duals, plot_inputs, plot_load_comparison,
+                          plot_scenario_comparison, plot_schedule,
+                          plot_schedule_q3_comparison, plot_duals_q3,
+                          plot_q3_emin_sensitivity, plot_q3_cq_profiles,plot_q3_battery_schedule)
+from src.scenarios import scale_prices, scale_pv, set_disutility, set_tariffs
 
-
-def _finish(fig: plt.Figure, save_to: Path | str | None) -> plt.Figure:
-    fig.tight_layout()
-    if save_to is not None:
-        Path(save_to).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_to, dpi=150)
-    return fig
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
-def plot_inputs(data: InputData, save_to: Path | str | None = None) -> plt.Figure:
-    """Hourly prices (with tariffs) and available PV / load preferences, side by side."""
-    h = data.hours
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 3.8))
+def run_base_case(question: str, out: Path, show: bool) -> Results | None:
+    data = load_question(question)
+    print(data.summary(), "\n")
+    plot_inputs(data, save_to=out / "inputs.png")
 
-    ax1.step(h, data.energy_price, where="mid",
-             label="energy price", color="k")
-    ax1.step(h, data.energy_price + data.import_tariff,
-             where="mid", ls="--", label="price + import tariff")
-    ax1.step(h, data.energy_price - data.export_tariff,
-             where="mid", ls=":", label="price - export tariff")
-    ax1.set(xlabel="hour", ylabel="DKK/kWh", title="Electricity prices")
-    ax1.legend(fontsize=8)
+    try:
+        # the class registered for this case
+        ModelClass = model_for_case(question)
+        model = ModelClass(data).build()
+        results = model.solve()
+    except NotImplementedError as e:
+        print(f"[skipped] {e}")
+        return None
 
-    ax2.fill_between(h, data.pv_available, step="mid",
-                     alpha=0.4, color="orange", label="PV available")
-    ax2.axhline(data.load_max_kWh, color="C3", ls="--", label="max load")
-    if data.load_min_kWh > 0:
-        ax2.axhline(data.load_min_kWh, color="C3", ls=":", label="min load")
-    if data.reference_load is not None:
-        ax2.step(h, data.reference_load, where="mid",
-                 color="C0", label="reference load")
-    ax2.set(xlabel="hour", ylabel="kWh/h", title="PV and load preferences")
-    ax2.legend(fontsize=8)
-    fig.suptitle(f"Input data - {data.question}", fontsize=11)
-    return _finish(fig, save_to)
+    results_q2c = None
+    if "Q3" in question:
+        print("--> Q3 question detected, solving Q2.(c) (without E_min constraint) simultaneously for comparison curves...")
+        model_q2c = Q2QuadraticModel(data).build()
+        results_q2c = model_q2c.solve()
+        print(f"Q2.(c) solved. Unconstrained energy consumption: {results_q2c.hourly['load'].sum():.2f} kWh (Q3 mandatory constraint is {data.min_daily_energy_kWh:.2f} kWh)")
 
+    print(results, "\n")
+    results.save(out)
 
-def plot_schedule(results: Results, data: InputData, save_to: Path | str | None = None) -> plt.Figure:
-    """Optimal schedule: load, PV used, import/export, with prices on a second axis."""
-    hr = results.hourly
-    h = hr.index.to_numpy()
-    fig, ax = plt.subplots(figsize=(11, 4.2))
-
-    width = 0.8
-    if "load" in hr:
-        ax.bar(h, hr["load"], width, color="C0", alpha=0.7, label="load")
-    if "pv" in hr:
-        ax.bar(h, -hr["pv"], width, color="orange", alpha=0.7,
-               label="PV used (negative = generation)")
-    if "pv_available" in hr and "pv" in hr:
-        ax.step(h, -hr["pv_available"], where="mid",
-                color="orange", ls="--", lw=1, label="PV available")
-    if "import" in hr and "export" in hr:
-        ax.plot(h, hr["import"] - hr["export"], "k.-",
-                label="net import (+) / export (-)")
-    if "reference_load" in hr:
-        ax.step(h, hr["reference_load"], where="mid",
-                color="C0", ls=":", label="reference load")
-    ax.axhline(0, color="grey", lw=0.8)
-    ax.set(xlabel="hour", ylabel="kWh/h",
-           title=f"Optimal schedule - {results.question} (cost {results.objective:.1f} DKK)")
-
-    ax2 = ax.twinx()
-    ax2.step(h, hr["price"], where="mid", color="C3",
-             lw=1.2, label="energy price")
-    ax2.set_ylabel("DKK/kWh", color="C3")
-
-    lines, labels = ax.get_legend_handles_labels()
-    l2, lb2 = ax2.get_legend_handles_labels()
-    ax.legend(lines + l2, labels + lb2, fontsize=8, ncol=3,
-              loc="upper center", bbox_to_anchor=(0.5, -0.18))
-    return _finish(fig, save_to)
-
-
-def plot_duals(results: Results, data: InputData, save_to: Path | str | None = None) -> plt.Figure:
-    """Hourly dual variables (all ``dual_*`` columns) against the price signals."""
-    hr = results.hourly
-    dual_cols = [c for c in hr.columns if c.startswith("dual_")]
-    fig, ax = plt.subplots(figsize=(11, 4))
-    h = hr.index.to_numpy()
-    for c in dual_cols:
-        ax.step(h, hr[c], where="mid", label=c.removeprefix("dual_"))
-    ax.step(h, data.energy_price + data.import_tariff, where="mid",
-            color="grey", ls="--", lw=1, label="price + import tariff")
-    ax.step(h, data.energy_price - data.export_tariff, where="mid",
-            color="grey", ls=":", lw=1, label="price - export tariff")
-    ax.set(xlabel="hour", ylabel="DKK/kWh",
-           title=f"Dual variables - {results.question}")
-    ax.legend(fontsize=8, ncol=3)
-    return _finish(fig, save_to)
-
-
-def plot_disutility_sweep(
-        df, price_import=(), price_export=(), base_value: float | None = None,
-        xlabel: str = 'disutility coefficient', logx: bool = False,
-        save_to: Path | str | None = None,
-) -> plt.Figure:
-    '''Metrics of a disutility-coefficient sweep. For 2(b) and 2(c), iv.
-
-    Top: total absolute deviation (left axis, kWh) and number of deviating hours (right).
-    Bottom: cost components (DKK). Vertical grey lines mark the distinct hourly effective
-    import (dashed) and export (dotted) prices - the values where the hypotheses of
-    2.(b).ii predict the steps of the linear model.
-    '''
-    x = df.index.to_numpy()
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6.8), sharex=True)
-
-    for ax in (ax1, ax2):
-        for v in np.unique(price_import):
-            ax.axvline(v, color="grey", ls="--", lw=0.5, alpha=0.6)
-        for v in np.unique(price_export):
-            ax.axvline(v, color="grey", ls=":", lw=0.5, alpha=0.6)
-        if base_value is not None:
-            ax.axvline(base_value, color="C3", lw=1.0, alpha=0.8)
-
-    ax1.plot(x, df["abs_deviation_kWh"], ".-",
-             color="C0", label="total |deviation| [kWh]")
-    ax1.plot(x, df["energy_kWh"], ".-", color="C2",
-             label="daily energy consumed [kWh]")
-    ax1.set_ylabel("kWh")
-    ax1b = ax1.twinx()
-    ax1b.plot(x, df["hours_deviating"], ".-",
-              color="C1", label="# deviating hours")
-    ax1b.set_ylabel("hours", color="C1")
-    lines, labels = ax1.get_legend_handles_labels()
-    l2, lb2 = ax1b.get_legend_handles_labels()
-    ax1.legend(lines + l2, labels + lb2, fontsize=8, loc="upper right")
-    title = "Sweep of the disutility coefficient"
-    if len(np.atleast_1d(price_import)) or len(np.atleast_1d(price_export)):
-        title += " (grey lines: hourly effective prices)"
-    if base_value is not None:
-        title += " - red: base value"
-    ax1.set_title(title, fontsize=10)
-
-    ax2.plot(x, df["procurement_DKK"], ".-", label="procurement cost")
-    ax2.plot(x, df["disutility_DKK"], ".-", label="total disutility")
-    ax2.plot(x, df["total_cost_DKK"], "k.-", label="total cost (objective)")
-    ax2.set(xlabel=xlabel, ylabel="DKK")
-    ax2.legend(fontsize=8)
-    if logx:
-        ax1.set_xscale("log")
-    return _finish(fig, save_to)
-
-
-def plot_load_comparison(runs, data: InputData, save_to: Path | str | None = None) -> plt.Figure:
-    """For Question 2(d) --> the optimal load of several models on one shared axis, versus the
-    reference profile and the available PV, with prices on a secondary axis.
-
-    ``runs`` maps a label (e.g. "Q1 (linear utility)") to a :class:`Results`.
-    """
-    fig, ax = plt.subplots(figsize=(11, 4.4))
-    h = data.hours
-    ax.step(h, data.reference_load, where="mid", color="k",
-            ls=":", lw=1.4, label="reference profile")
-    ax.step(h, data.pv_available, where="mid", color="orange",
-            ls="--", lw=1.1, label="PV available")
-    for (label, res), color in zip(runs.items(), ("C0", "C2", "C3", "C4")):
-        ax.step(h, res.hourly["load"], where="mid",
-                color=color, lw=1.6, label=f"load - {label}")
-    ax.set(xlabel="hour", ylabel="kWh/h",
-           title="Optimal load profiles across objective functions (base cases)")
-
-    ax2 = ax.twinx()
-    ax2.step(h, data.energy_price, where="mid", color="grey",
-             lw=0.9, alpha=0.7, label="energy price")
-    ax2.set_ylabel("DKK/kWh", color="grey")
-
-    lines, labels = ax.get_legend_handles_labels()
-    l2, lb2 = ax2.get_legend_handles_labels()
-    ax.legend(lines + l2, labels + lb2, fontsize=8, ncol=3,
-              loc="upper center", bbox_to_anchor=(0.5, -0.18))
-    return _finish(fig, save_to)
-
-
-def plot_scenario_comparison(
-    runs: dict[str, Results], metric: str = "objective", save_to: Path | str | None = None
-) -> plt.Figure:
-    """Bar chart of one metric across scenarios. ``metric`` is ``"objective"`` or the name of an
-    hourly column whose daily sum is compared (e.g. ``"import"``, ``"export"``, ``"load"``)."""
-    names = list(runs)
-    if metric == "objective":
-        values = [r.objective for r in runs.values()]
-        ylabel = "daily cost [DKK]"
+    if "Q3" in question and results_q2c is not None:
+        plot_schedule_q3_comparison(results, results_q2c, data, save_to=out / "schedule.png")
+        plot_duals_q3(results, data, save_to=out / "duals.png")
     else:
-        values = [r.hourly[metric].sum() for r in runs.values()]
-        ylabel = f"daily {metric} [kWh]"
-    fig, ax = plt.subplots(figsize=(max(5, 1.2 * len(names)), 3.8))
-    ax.bar(names, values, color="C0")
-    ax.set(ylabel=ylabel, title=f"Scenario comparison - {metric}")
-    ax.tick_params(axis="x", rotation=20)
-    return _finish(fig, save_to)
+        plot_schedule(results, data, save_to=out / "schedule.png")
+        plot_duals(results, data, save_to=out / "duals.png")
 
-def plot_schedule_q3_comparison(results_q3, results_q2c, data, save_to=None):
-    fig, ax1 = plt.subplots(figsize=(10, 4.5), dpi=150)
+    if show:
+        matplotlib.pyplot.show()
+    return results
+
+
+def run_scenarios(question: str, out: Path) -> dict[str, Results]:
+    """Example sensitivity analysis. Replace with the scenarios you design in Question 1.g."""
+    base = load_question(question)
+    scenarios = {
+        "base": base,
+        "flat_prices": scale_prices(base, factor=0.0, keep_mean=True),
+        "double_spread": scale_prices(base, factor=2.0, keep_mean=True),
+        "no_tariffs": set_tariffs(base, import_tariff=0.0, export_tariff=0.0),
+        "no_pv": scale_pv(base, factor=0.0),
+    }
+    runs: dict[str, Results] = {}
+    ModelClass = model_for_case(question)
+    for name, data in scenarios.items():
+        results = ModelClass(data).build().solve()
+        results.save(out, tag=name)
+        runs[name] = results
+        print(f"{name:>14}: cost {results.objective:8.2f} DKK | import {results.hourly['import'].sum():5.1f} kWh"
+              f" | export {results.hourly['export'].sum():5.1f} kWh")
+    plot_scenario_comparison(
+        runs, "objective", save_to=out / "scenarios_cost.png")
+    return runs
+
+
+def _disutility_sweep(case: str, coeff: str, grid, out: Path, xlabel: str,
+                      price_lines: bool = True, logx: bool = False):
+    """Shared code of the disutility sweeps Questions 2.(b).iv and 2.(c).iv.
+
+    Solves the case once per coefficient value in ``grid`` and collects the metric table
+    required by the assignment: daily procurement cost, total disutility, daily energy
+    consumed, total absolute deviation, and the number of hours with a non-zero deviation.
+    """
+    import numpy as np
+    import pandas as pd
+
+    base = load_question(case)
+    ModelClass = model_for_case(case)
+    rows = []
+    for c in grid:
+        res = ModelClass(set_disutility(
+            base, **{coeff: float(c)})).build().solve()
+        h = res.hourly
+        dev = (h["load"] - h["reference_load"]).abs()
+        rows.append({
+            coeff: float(c),
+            "procurement_DKK": res.meta["objective_terms"]["procurement_cost"],
+            "disutility_DKK": res.meta["objective_terms"]["disutility"],
+            "total_cost_DKK": res.objective,
+            "energy_kWh": h["load"].sum(),
+            "abs_deviation_kWh": dev.sum(),
+            "hours_deviating": int((dev > 1e-6).sum()),
+        })
+    df = pd.DataFrame(rows).set_index(coeff)
+    stem = "sweep_c_L" if coeff == "linear" else "sweep_c_Q"
+    df.to_csv(out / f"{stem}.csv")
+    plot_disutility_sweep(
+        df,
+        price_import=(base.energy_price +
+                      base.import_tariff) if price_lines else (),
+        price_export=(base.energy_price -
+                      base.export_tariff) if price_lines else (),
+        base_value=getattr(base, f"{coeff}_disutility"),
+        xlabel=xlabel, logx=logx, save_to=out / f"{stem}.png")
+    print(df.iloc[::4].to_string(float_format=lambda v: f"{v:8.2f}"))
+    print(f"\nSweep written to {out / stem}.csv/.png")
+    return df
+
+
+def run_q2b_sweep(out: Path):
+    '''Question 2b.iv, to sweep c_L on Q2_linear. The range spans from below the smallest supply
+    margin (deviating everywhere), to above the largest one (never deviate). Those margins are the
+    hourly effective prices and c_PV'''
+    import numpy as np
+    base = load_question('Q2_linear')
+    grid = np.round(np.arange(0.05, (base.energy_price +
+                                    base.import_tariff).max() + 0.35, 0.05), 2)
+    return _disutility_sweep('Q2_linear', 'linear', grid, out, xlabel='c_L [DKK/kWh]')
+
+
+def run_q2c_sweep(out: Path):
+    '''Question 2c.iv: sweep c_Q on Q2_quadratic (same metric table as 2b.iv).
+
+    This uses a geometric grid: the interior response scales like (price margin)/(2 c_Q),
+    so equal *ratios* of c_Q... not equal increments. It probes evenly. Chosen relative to
+    the data: at c_Q = 0.02 the implied deviations far exceed the load bounds (near
+    cost-minimizer behavior), at c_Q = 10 they are ~0.1 kWh (near reference-tracking).
+    No vertical price lines: c_Q is in DKK/kWh^2, not comparable with prices, and the
+    hypothesis is a smooth response with no thresholds.'''
+    import numpy as np
+    grid = np.round(np.geomspace(0.02, 10.0, 40), 4)
+    return _disutility_sweep('Q2_quadratic', 'quadratic', grid, out,
+                             xlabel="c_Q [DKK/kWh^2]", price_lines=False, logx=True)
+
+
+def run_q2d_comparison(out: Path):
+    '''Question 2d: compare the three objective functions on the same day.
+
+    Solves the base case of each model (Q1 linear utility on Q1_caseA; linear and
+    quadratic disutility on their Q2 cases - identical prices, tariffs and PV, cf. the
+    data README), overlays the optimal load profiles, and tabulates the shared metrics.
+    The deviation of the Q1 consumer is measured against the Q2 reference profile for
+    comparability (Q1 itself has no reference; same load bounds in all cases).
+    '''
+    import numpy as np
+    import pandas as pd
+
+    # carries the reference profile
+    ref_data = load_question("Q2_linear")
+    cases = {
+        "Q1 (linear utility)": "Q1_caseA",
+        "linear disutility": "Q2_linear",
+        "quadratic disutility": "Q2_quadratic",
+    }
+    runs, rows = {}, []
+    for label, case in cases.items():
+        res = model_for_case(case)(load_question(case)).build().solve()
+        runs[label] = res
+        h = res.hourly
+        dev = (h["load"] - ref_data.reference_load).abs()
+        terms = res.meta["objective_terms"]
+        rows.append({
+            "model": label,
+            "procurement_DKK": terms["procurement_cost"],
+            "preference_term_DKK": terms.get("disutility", -terms.get("utility", np.nan)),
+            "energy_kWh": h["load"].sum(),
+            "import_kWh": h["import"].sum(),
+            "export_kWh": h["export"].sum(),
+            "abs_dev_vs_ref_kWh": dev.sum(),
+            "hours_deviating": int((dev > 1e-6).sum()),
+        })
+    df = pd.DataFrame(rows).set_index("model")
+    out.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out / "q2d_model_comparison.csv")
+    plot_load_comparison(runs, ref_data, save_to=out / "q2d_load_profiles.png")
+    print(df.to_string(float_format=lambda v: f"{v:8.2f}"))
+    print(f"\nComparison written to {out}")
+    return df
+
+from src.model import Q2QuadraticModel
+from src.q3_model import ModelQ3
+
+def run_q3_analysis(question: str = "Q3_base", out: Path = RESULTS_DIR / "Q3_base"):
+    out.mkdir(parents=True, exist_ok=True)
+    data = load_question(question)
     
-    h = results_q3.hourly          
-    hours = h.index
+    res_q2c = Q2QuadraticModel(data).build().solve()
+    
+    res_q3 = ModelQ3(data).build().solve()
+    
+    res_q3.save(out)
 
-    ax1.bar(hours, h["load"], width=0.4, label="Q3 load (with $E_{\min}$)", color="#5B9BD5", alpha=0.7)
+    plot_schedule_q3_comparison(res_q3, res_q2c, data, save_to=out / "schedule.png")
+    plot_duals_q3(res_q3, data, save_to=out / "duals.png")
+    
+    print(f"Q3 analysis completed, figures saved to: {out}")
 
-    if "reference_load" in h.columns:
-        ax1.plot(hours, h["reference_load"], linestyle=":", color="#1F4E79", linewidth=2, label="reference load ($\ell_t^{ref}$)")
+import copy
+from src.run_q3_sensitivity import run_e_min_sweep
+def run_q3_sensitivity_analysis(question: str = "Q3_base", out: Path = RESULTS_DIR / "Q3_sensitivity"):
+    """Runs E_min and c_Q sensitivity analysis for Q3 and outputs figures to results/."""
+    out.mkdir(parents=True, exist_ok=True)
+    base_data = load_question(question)
 
-    if results_q2c is not None:
-        ax1.plot(
-            hours, 
-            results_q2c.hourly["load"], 
-            linestyle="--", 
-            color="#ED7D31", 
-            linewidth=2, 
-            marker="s", 
-            markersize=3.5, 
-            label="Q2.(c) load (unconstrained)"
-        )
+    print("--> Running Q3 E_min Sensitivity Sweep...")
+    df_emin = run_e_min_sweep(base_data)
+    df_emin.to_csv(out / "emin_sensitivity.csv", index=False)
+    plot_q3_emin_sensitivity(df_emin, save_to=out / "emin_sensitivity.png")
 
-    if "import" in h.columns and "export" in h.columns:
-        ax1.plot(hours, h["import"] - h["export"], marker="o", color="black", linewidth=1.2, label="net import (+) / export (-)")
+    print("--> Running Q3 c_Q Load Profile Comparison...")
+    selected_cq = [0.1, 1.0, 5.0]
+    cq_results = {}
+    for cq in selected_cq:
+        data = copy.deepcopy(base_data)
+        data.quadratic_disutility = cq
+        res = ModelQ3(data).build().solve()
+        cq_results[cq] = res.hourly
 
-    ax2 = ax1.twinx()
-    ax2.plot(hours, data.energy_price, color="#C00000", linestyle="-", label="energy price")
-    ax2.set_ylabel("DKK/kWh", color="#C00000")
+    plot_q3_cq_profiles(cq_results, base_data, save_to=out / "cq_load_profiles.png")
+    print(f"\nQ3 Sensitivity Analysis complete! Outputs written to: {out}")
 
-    ax1.set_xlabel("hour")
-    ax1.set_ylabel("kWh/h")
-    ax1.set_title(f"Optimal schedule - {results_q3.question} (cost {results_q3.objective:.1f} DKK)")  
+from src.q3_model import ModelQ3Battery
 
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3)
+def run_q3_battery_base(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3_battery"):
+    """Runs the base case analysis for Q3 with battery storage (default: Option A)."""
+    out.mkdir(parents=True, exist_ok=True)
+    data = load_question(question)
+    
+    model = ModelQ3Battery(data, end_soc_mode="constraint").build()
+    results = model.solve()
+    # -------------------------------------------------------
+    
+    results.save(out)
+    print(f"Q3 Battery Base Case Solved! Total Cost: {results.objective:.2f} DKK")
+    
+    
+    plot_q3_battery_schedule(results, data, save_to=out / "battery_schedule.png")
+    return results
 
-    return _finish(fig, save_to)
+def run_q3g_soc_comparison(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3g_soc_comparison"):
+    """Runs the comparison experiment for Q3.(g).i: Option A vs Option B vs Free mode."""
+    out.mkdir(parents=True, exist_ok=True)
+    data = load_question(question)
 
+    print("--> Running Q3.(g).i End-of-Horizon SoC Strategy Comparison...")
+    
+    # Option A: Constraint mode (SoC_24 >= SoC_0)
+    res_a = ModelQ3Battery(data, end_soc_mode="constraint").build().solve()
 
-def plot_duals_q3(results_q3, data, save_to=None):
-    fig, ax = plt.subplots(figsize=(10, 4), dpi=150)
-    h = results_q3.hourly          
-    hours = h.index
+    # Option B: Objective valuation mode (Valued at last hour import price)
+    res_b = ModelQ3Battery(data, end_soc_mode="objective").build().solve()
 
-    if "dual_balance" in h.columns:
-        ax.plot(hours, h["dual_balance"], label="dual balance ($\lambda_t$)", color="#1F77B4", linewidth=1.5)
-    if "dual_pv_max" in h.columns:
-        ax.plot(hours, h["dual_pv_max"], label="dual pv_max", color="#FF7F0E", linewidth=1.5)
+    # Free mode: Unconstrained end SoC (Battery empties at hour 24)
+    res_free = ModelQ3Battery(data, end_soc_mode="free").build().solve()
+    # -------------------------------------------------------
 
-    p_imp = data.energy_price + data.import_tariff
-    p_exp = data.energy_price - data.export_tariff
-    ax.plot(hours, p_imp, linestyle="--", color="gray", alpha=0.6, label="price + import tariff")
-    ax.plot(hours, p_exp, linestyle=":", color="gray", alpha=0.6, label="price - export tariff")
+    print(f"Option A (Constraint) : End SoC = {res_a.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_a.objective:.2f} DKK")
+    print(f"Option B (Valuation)  : End SoC = {res_b.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_b.objective:.2f} DKK")
+    print(f"Option Free           : End SoC = {res_free.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_free.objective:.2f} DKK")
 
-    if "min_daily_energy" in results_q3.duals:
-        mu_val = abs(results_q3.duals["min_daily_energy"]) 
-        ax.axhline(y=mu_val, color="red", linestyle="--", linewidth=1.5, label=f"$\mu$ (min energy dual = {mu_val:.2f} DKK/kWh)")
+    res_a.save(out, tag="OptionA_Constraint")
+    res_b.save(out, tag="OptionB_Valuation")
+    res_free.save(out, tag="Free")
+    
+    return {"Option A": res_a, "Option B": res_b, "Free": res_free}
 
-    ax.set_xlabel("hour")
-    ax.set_ylabel("DKK/kWh")
-    ax.set_title(f"Dual variables - {results_q3.question}") 
-    ax.legend(loc="upper right", fontsize=8.5)
+import pandas as pd
+from src.plotting import plot_q3g_sensitivity
+def run_q3g_sensitivity_analysis(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3g_sensitivity"):
+    out.mkdir(parents=True, exist_ok=True)
+    base_data = load_question(question)
 
-    return _finish(fig, save_to)
+    print("--> Running Q3.(g).v Battery Value Sensitivity Analysis...")
+
+    # 1. Sweep Environment Parameter: Price Spread Scale
+    spread_scales = [0.0, 0.5, 1.0, 1.5, 2.0]
+    results_spread = []
+    
+    for scale in spread_scales:
+        data = copy.deepcopy(base_data)
+        p_mean = data.energy_price.mean()
+        data.energy_price = p_mean + scale * (data.energy_price - p_mean)
+        
+        # Base model without battery
+        cost_no_bat = ModelQ3(data).build().solve().objective
+        # Model with battery
+        cost_with_bat = ModelQ3Battery(data, end_soc_mode="constraint").build().solve().objective
+        
+        v_bat = cost_no_bat - cost_with_bat
+        results_spread.append({
+            "price_spread_scale": scale,
+            "cost_no_battery": cost_no_bat,
+            "cost_with_battery": cost_with_bat,
+            "value_of_battery": v_bat
+        })
+    df_spread = pd.DataFrame(results_spread)
+    df_spread.to_csv(out / "value_vs_price_spread.csv", index=False)
+
+    # 2. Sweep Technical Parameter: Battery Capacity
+    capacities = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+    results_cap = []
+
+    # Calculate baseline ratio of initial SoC to capacity
+    soc_ratio = (
+        (base_data.battery_initial_soc_kWh / base_data.battery_capacity_kWh)
+        if (base_data.battery_capacity_kWh and base_data.battery_capacity_kWh > 0)
+        else 0.5
+    )
+    
+    # Baseline without battery on unscaled base data
+    cost_no_bat_base = ModelQ3(base_data).build().solve().objective
+    
+    for cap in capacities:
+        data = copy.deepcopy(base_data)
+        data.battery_capacity_kWh = cap
+
+        data.battery_initial_soc_kWh = cap * soc_ratio
+
+        cost_with_bat = ModelQ3Battery(data, end_soc_mode="constraint").build().solve().objective
+        v_bat = cost_no_bat_base - cost_with_bat
+        
+        results_cap.append({
+            "capacity_kWh": cap,
+            "cost_with_battery": cost_with_bat,
+            "value_of_battery": v_bat
+        })
+    df_cap = pd.DataFrame(results_cap)
+    df_cap.to_csv(out / "value_vs_capacity.csv", index=False)
+
+    # Plot and save
+    plot_q3g_sensitivity(df_spread, df_cap, save_to=out / "battery_value_sensitivity.png")
+    print(f"\nQ3.(g).v Analysis complete! Figures and CSVs saved to {out}")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--question", default="Q1_caseA",
+                        choices=list_questions(), help="data case to use")
+    parser.add_argument("--scenarios", action="store_true",
+                        help="also run the example sensitivity scenarios")
+    parser.add_argument("--sweep-cl", action="store_true",
+                        help="run the c_L sweep of Question 2.(b).iv (case Q2_linear)")
+    parser.add_argument("--sweep-cq", action="store_true",
+                        help="run the c_Q sweep of Question 2.(c).iv (case Q2_quadratic)")
+    parser.add_argument("--compare-q2", action="store_true",
+                        help="run the multi-model comparison of Question 2.(d)")
+    parser.add_argument("--q3-sensitivity", action="store_true",
+                        help="run Q3 sensitivity analysis (E_min & c_Q sweeps) and save plots to results/")
+    parser.add_argument("--show", action="store_true",
+                        help="open the figures in a window")
+    parser.add_argument("--q3-battery", action="store_true",
+                        help="run Q3.(g) battery base case")
+    parser.add_argument("--compare-soc-modes", action="store_true",
+                        help="run Q3.(g).i comparison across end-of-horizon SoC modes")
+    parser.add_argument("--q3g-sensitivity", action="store_true",
+                    help="run Q3.(g).v battery value sensitivity analysis")
+    args = parser.parse_args()
+
+    out = RESULTS_DIR / args.question
+    out.mkdir(parents=True, exist_ok=True)
+    if not args.show:
+        matplotlib.use("Agg")
+
+    base = run_base_case(args.question, out, args.show)
+    print(f"\nOutputs written to {out}")
+
+    if args.q3_sensitivity:
+        q_name = args.question if "Q3" in args.question else "Q3"
+        sens_out = RESULTS_DIR / "Q3_sensitivity"
+        run_q3_sensitivity_analysis(question=q_name, out=sens_out)
+        return
+
+    if args.q3_battery:
+        run_q3_battery_base(question="Q3_battery")
+        return
+
+    if args.compare_soc_modes:
+        run_q3g_soc_comparison(question="Q3_battery")
+        return
+
+    if args.q3g_sensitivity:
+        run_q3g_sensitivity_analysis(question="Q3_battery")
+        return
+    
+if __name__ == "__main__":
+    main()
