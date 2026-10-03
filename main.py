@@ -18,7 +18,8 @@ from src.data_loader import load_question, list_questions
 from src.model import Results, model_for_case
 from src.plotting import (plot_disutility_sweep, plot_duals, plot_inputs, plot_load_comparison,
                           plot_scenario_comparison, plot_schedule,
-                          plot_schedule_q3_comparison, plot_duals_q3)
+                          plot_schedule_q3_comparison, plot_duals_q3,
+                          plot_q3_emin_sensitivity, plot_q3_cq_profiles,plot_q3_battery_schedule)
 from src.scenarios import scale_prices, scale_pv, set_disutility, set_tariffs
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -215,6 +216,142 @@ def run_q3_analysis(question: str = "Q3_base", out: Path = RESULTS_DIR / "Q3_bas
     
     print(f"Q3 analysis completed, figures saved to: {out}")
 
+import copy
+from src.run_q3_sensitivity import run_e_min_sweep
+def run_q3_sensitivity_analysis(question: str = "Q3_base", out: Path = RESULTS_DIR / "Q3_sensitivity"):
+    """Runs E_min and c_Q sensitivity analysis for Q3 and outputs figures to results/."""
+    out.mkdir(parents=True, exist_ok=True)
+    base_data = load_question(question)
+
+    print("--> Running Q3 E_min Sensitivity Sweep...")
+    df_emin = run_e_min_sweep(base_data)
+    df_emin.to_csv(out / "emin_sensitivity.csv", index=False)
+    plot_q3_emin_sensitivity(df_emin, save_to=out / "emin_sensitivity.png")
+
+    print("--> Running Q3 c_Q Load Profile Comparison...")
+    selected_cq = [0.1, 1.0, 5.0]
+    cq_results = {}
+    for cq in selected_cq:
+        data = copy.deepcopy(base_data)
+        data.quadratic_disutility = cq
+        res = ModelQ3(data).build().solve()
+        cq_results[cq] = res.hourly
+
+    plot_q3_cq_profiles(cq_results, base_data, save_to=out / "cq_load_profiles.png")
+    print(f"\nQ3 Sensitivity Analysis complete! Outputs written to: {out}")
+
+from src.q3_model import ModelQ3Battery
+
+def run_q3_battery_base(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3_battery"):
+    """Runs the base case analysis for Q3 with battery storage (default: Option A)."""
+    out.mkdir(parents=True, exist_ok=True)
+    data = load_question(question)
+    
+    model = ModelQ3Battery(data, end_soc_mode="constraint").build()
+    results = model.solve()
+    # -------------------------------------------------------
+    
+    results.save(out)
+    print(f"Q3 Battery Base Case Solved! Total Cost: {results.objective:.2f} DKK")
+    
+    
+    plot_q3_battery_schedule(results, data, save_to=out / "battery_schedule.png")
+    return results
+
+def run_q3g_soc_comparison(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3g_soc_comparison"):
+    """Runs the comparison experiment for Q3.(g).i: Option A vs Option B vs Free mode."""
+    out.mkdir(parents=True, exist_ok=True)
+    data = load_question(question)
+
+    print("--> Running Q3.(g).i End-of-Horizon SoC Strategy Comparison...")
+    
+    # Option A: Constraint mode (SoC_24 >= SoC_0)
+    res_a = ModelQ3Battery(data, end_soc_mode="constraint").build().solve()
+
+    # Option B: Objective valuation mode (Valued at last hour import price)
+    res_b = ModelQ3Battery(data, end_soc_mode="objective").build().solve()
+
+    # Free mode: Unconstrained end SoC (Battery empties at hour 24)
+    res_free = ModelQ3Battery(data, end_soc_mode="free").build().solve()
+    # -------------------------------------------------------
+
+    print(f"Option A (Constraint) : End SoC = {res_a.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_a.objective:.2f} DKK")
+    print(f"Option B (Valuation)  : End SoC = {res_b.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_b.objective:.2f} DKK")
+    print(f"Option Free           : End SoC = {res_free.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_free.objective:.2f} DKK")
+
+    res_a.save(out, tag="OptionA_Constraint")
+    res_b.save(out, tag="OptionB_Valuation")
+    res_free.save(out, tag="Free")
+    
+    return {"Option A": res_a, "Option B": res_b, "Free": res_free}
+
+import pandas as pd
+from src.plotting import plot_q3g_sensitivity
+def run_q3g_sensitivity_analysis(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3g_sensitivity"):
+    out.mkdir(parents=True, exist_ok=True)
+    base_data = load_question(question)
+
+    print("--> Running Q3.(g).v Battery Value Sensitivity Analysis...")
+
+    # 1. Sweep Environment Parameter: Price Spread Scale
+    spread_scales = [0.0, 0.5, 1.0, 1.5, 2.0]
+    results_spread = []
+    
+    for scale in spread_scales:
+        data = copy.deepcopy(base_data)
+        p_mean = data.energy_price.mean()
+        data.energy_price = p_mean + scale * (data.energy_price - p_mean)
+        
+        # Base model without battery
+        cost_no_bat = ModelQ3(data).build().solve().objective
+        # Model with battery
+        cost_with_bat = ModelQ3Battery(data, end_soc_mode="constraint").build().solve().objective
+        
+        v_bat = cost_no_bat - cost_with_bat
+        results_spread.append({
+            "price_spread_scale": scale,
+            "cost_no_battery": cost_no_bat,
+            "cost_with_battery": cost_with_bat,
+            "value_of_battery": v_bat
+        })
+    df_spread = pd.DataFrame(results_spread)
+    df_spread.to_csv(out / "value_vs_price_spread.csv", index=False)
+
+    # 2. Sweep Technical Parameter: Battery Capacity
+    capacities = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+    results_cap = []
+
+    # Calculate baseline ratio of initial SoC to capacity
+    soc_ratio = (
+        (base_data.battery_initial_soc_kWh / base_data.battery_capacity_kWh)
+        if (base_data.battery_capacity_kWh and base_data.battery_capacity_kWh > 0)
+        else 0.5
+    )
+    
+    # Baseline without battery on unscaled base data
+    cost_no_bat_base = ModelQ3(base_data).build().solve().objective
+    
+    for cap in capacities:
+        data = copy.deepcopy(base_data)
+        data.battery_capacity_kWh = cap
+
+        data.battery_initial_soc_kWh = cap * soc_ratio
+
+        cost_with_bat = ModelQ3Battery(data, end_soc_mode="constraint").build().solve().objective
+        v_bat = cost_no_bat_base - cost_with_bat
+        
+        results_cap.append({
+            "capacity_kWh": cap,
+            "cost_with_battery": cost_with_bat,
+            "value_of_battery": v_bat
+        })
+    df_cap = pd.DataFrame(results_cap)
+    df_cap.to_csv(out / "value_vs_capacity.csv", index=False)
+
+    # Plot and save
+    plot_q3g_sensitivity(df_spread, df_cap, save_to=out / "battery_value_sensitivity.png")
+    print(f"\nQ3.(g).v Analysis complete! Figures and CSVs saved to {out}")
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -228,8 +365,16 @@ def main() -> None:
                         help="run the c_Q sweep of Question 2.(c).iv (case Q2_quadratic)")
     parser.add_argument("--compare-q2", action="store_true",
                         help="run the multi-model comparison of Question 2.(d)")
+    parser.add_argument("--q3-sensitivity", action="store_true",
+                        help="run Q3 sensitivity analysis (E_min & c_Q sweeps) and save plots to results/")
     parser.add_argument("--show", action="store_true",
                         help="open the figures in a window")
+    parser.add_argument("--q3-battery", action="store_true",
+                        help="run Q3.(g) battery base case")
+    parser.add_argument("--compare-soc-modes", action="store_true",
+                        help="run Q3.(g).i comparison across end-of-horizon SoC modes")
+    parser.add_argument("--q3g-sensitivity", action="store_true",
+                    help="run Q3.(g).v battery value sensitivity analysis")
     args = parser.parse_args()
 
     out = RESULTS_DIR / args.question
@@ -240,6 +385,23 @@ def main() -> None:
     base = run_base_case(args.question, out, args.show)
     print(f"\nOutputs written to {out}")
 
+    if args.q3_sensitivity:
+        q_name = args.question if "Q3" in args.question else "Q3"
+        sens_out = RESULTS_DIR / "Q3_sensitivity"
+        run_q3_sensitivity_analysis(question=q_name, out=sens_out)
+        return
 
+    if args.q3_battery:
+        run_q3_battery_base(question="Q3_battery")
+        return
+
+    if args.compare_soc_modes:
+        run_q3g_soc_comparison(question="Q3_battery")
+        return
+
+    if args.q3g_sensitivity:
+        run_q3g_sensitivity_analysis(question="Q3_battery")
+        return
+    
 if __name__ == "__main__":
     main()
