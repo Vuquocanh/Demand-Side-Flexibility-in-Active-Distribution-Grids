@@ -221,6 +221,10 @@ class FlexibleConsumerModel:
         d, T = self.data, list(self.T)
         hourly = pd.DataFrame(index=pd.Index(T, name="hour"))
         hourly["price"] = d.energy_price
+        # effective prices the consumer actually faces (DKK/kWh), used by the hour-by-hour
+        # price-ladder check of Question 1.(f)
+        hourly["pi_imp"] = self.price_import
+        hourly["pi_exp"] = self.price_export
         hourly["pv_available"] = d.pv_available
         if d.reference_load is not None:
             hourly["reference_load"] = d.reference_load
