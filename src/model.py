@@ -2,22 +2,22 @@
 
 Here, we will use one class for each question, sharing a common skeleton.
 
-    FlexibleConsumerModel   -> for Q1, price-elastic consumption. we MAXIMIZES daily surplus
-    Q2LinearModel           -> for Q2b, linear disutility |l - ref|, we MINIMIZES cost + disutility
-    Q3QuadraticModel        -> for Q2c, quadratic disutility, we MINIMIZES cost + disutility
+    FlexibleConsumerModel   -> for Q1, price-elastic consumption, MAXIMIZES daily surplus
+    Q2LinearModel           -> for Q2b, linear disutility |l - ref|, MINIMIZES cost + disutility
+    Q2QuadraticModel        -> for Q2c, quadratic disutility, MINIMIZES cost + disutility
 
-Each model has its own natural optimization direction, and will be stated in the class docstring, because it matters when interpreting
-the duals. 
+Each model has its own optimisation direction, stated in its class docstring: it decides the
+sign of every dual value reported below.
 
-Usage (unchange from the course's template):
+Usage (unchanged from the course template):
 
     model = FlexibleConsumerModel(data)   # 1. hand over the input data
     model.build()                         # 2. declare variables, objective, constraints
     results = model.solve()               # 3. optimise and collect primal AND dual values
 
-``build()`` is the only method you need to complete for Question 1; the other questions
-are variations of it (a different objective, an extra constraint). Copy this file or
-subclass ``FlexibleConsumerModel`` and override ``build()`` to keep one model per question.
+Only ``build()`` differs between the questions: ``solve()`` and ``_extract_results()`` work
+through the ``self.var`` / ``self.con`` / ``self.expr`` dictionaries and need no change when a
+new model is added.
 
 Two conventions make the dual variables easy to read out afterwards:
 
@@ -95,7 +95,7 @@ class FlexibleConsumerModel:
         Direction: MAXIMIZE the daily surplus
         sum_t [ u_L * load_t - c_PV * pv_t - pi_imp_t * import_t + pi_exp_t * export_t ]
         with effective prices pi_imp_t = p_t + tau_imp and pi_exp_t = p_t - tau_exp
-        (see drafts/Q1a_formulation.md, eqs. (1a)-(1f)).
+        Equations (1a)-(1f) of the report.
 
         Subclass and override :meth:`build` (reusing the ``_add_common_*`` helpers) for the
         other questions.
@@ -271,7 +271,7 @@ class Q2LinearModel(FlexibleConsumerModel):
     Direction: MINIMIZE  sum_t [ c_L * s_t + c_PV * pv_t + pi_imp_t * import_t - pi_exp_t * export_t ]
     where the auxiliary variable s_t >= |load_t - ref_t| is enforced by the two linear
     constraint families ``dev_up``/``dev_dn`` and pushed down to equality at the optimum
-    by its positive objective coefficient (LP reformulation, drafts/Q2b eqs. (5a)-(5d)).
+    by its positive objective coefficient (LP reformulation, eqs. (5a)-(5d) of the report).
     """
 
     def build(self) -> "Q2LinearModel":
