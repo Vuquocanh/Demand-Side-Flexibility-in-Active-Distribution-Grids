@@ -394,7 +394,19 @@ def main() -> None:
     if not args.show:
         matplotlib.use("Agg")
 
+    if args.sweep_cl:
+        run_q2b_sweep(RESULTS_DIR / "Q2_linear")
+        return
+    if args.sweep_cq:
+        run_q2c_sweep(RESULTS_DIR / "Q2_quadratic")
+        return
+    if args.compare_q2:
+        run_q2d_comparison(RESULTS_DIR / "Q2_comparison")
+        return
+
     base = run_base_case(args.question, out, args.show)
+    if args.scenarios and base is not None:
+        run_scenarios(args.question, out)
     print(f"\nOutputs written to {out}")
 
     if args.q3_sensitivity:
