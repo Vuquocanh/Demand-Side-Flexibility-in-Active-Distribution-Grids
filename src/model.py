@@ -108,6 +108,7 @@ class FlexibleConsumerModel:
         self.m.Params.OutputFlag = 1 if verbose else 0
         # only relevant if you add a quadratic constraint (none is needed in Assignment 1)
         self.m.Params.QCPDual = 1
+        self.m.Params.DualReductions = 0
         # decision variables by name
         self.var: dict[str, gp.tupledict | gp.Var] = {}
         # constraints by name (duals read from here)
@@ -339,12 +340,21 @@ MODEL_BY_CASE: dict[str, type[FlexibleConsumerModel]] = {
 
 def model_for_case(question: str) -> type[FlexibleConsumerModel]:
     """Model class registered for a data case, with a clear error for future cases."""
-    try:
+    if question in MODEL_BY_CASE:
         return MODEL_BY_CASE[question]
-    except KeyError:
-        raise NotImplementedError(
-            f"No model implemented yet for case {question!r}. "
-            f"Implemented: {sorted(MODEL_BY_CASE)}") from None
+    
+    if "battery" in question.lower():
+        from .q3_model import ModelQ3Battery
+        return ModelQ3Battery
+
+    if question.startswith("Q3"):
+        from .q3_model import ModelQ3
+        return ModelQ3
+
+    raise NotImplementedError(
+        f"No model implemented yet for case {question!r}. "
+        f"Implemented: {sorted(MODEL_BY_CASE)} or any 'Q3_*' case."
+    )
 
 
 _STATUS = {
