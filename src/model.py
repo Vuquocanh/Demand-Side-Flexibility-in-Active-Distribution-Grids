@@ -142,10 +142,10 @@ class FlexibleConsumerModel:
         self.var['load'] = m.addVars(T, lb=-GRB.INFINITY, name='load')
         # PV production
         self.var['pv'] = m.addVars(T, name='pv')
-        self.var['import'] = m.addVars(
-            T, name='import')                # grid import
-        self.var['export'] = m.addVars(
-            T, name='export')                # grid export
+        # grid import
+        self.var['import'] = m.addVars(T, name='import')    
+        # grid export            
+        self.var['export'] = m.addVars(T, name='export')                
 
     def _add_common_constraints(self) -> None:
         """Constraints shared by every question: balance (1b), PV limit (1c), load bounds (1d)-(1e).
@@ -222,6 +222,10 @@ class FlexibleConsumerModel:
         d, T = self.data, list(self.T)
         hourly = pd.DataFrame(index=pd.Index(T, name="hour"))
         hourly["price"] = d.energy_price
+        # effective prices the consumer actually faces (DKK/kWh), used by the hour-by-hour
+        # price-ladder check of Question 1.(f)
+        hourly["pi_imp"] = self.price_import
+        hourly["pi_exp"] = self.price_export
         hourly["pv_available"] = d.pv_available
         if d.reference_load is not None:
             hourly["reference_load"] = d.reference_load

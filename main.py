@@ -13,7 +13,10 @@ import argparse
 from pathlib import Path
 
 import matplotlib
+import numpy as np
+import pandas as pd
 
+from src.analysis import check_price_ladder
 from src.data_loader import load_question, list_questions
 from src.model import Results, model_for_case
 from src.plotting import (plot_disutility_sweep, plot_duals, plot_inputs, plot_load_comparison,
@@ -48,6 +51,15 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
 
     print(results, "\n")
     results.save(out)
+
+    # Question 1.(f): price ladder of (d).ii-iii checked hour by hour, plus the hours in
+    # which the dual of the hourly balance is not uniquely determined
+    if data.consumption_utility is not None and "dual_balance" in results.hourly:
+        ladder = check_price_ladder(results, data)
+        ladder.to_csv(out / f"{question}_price_ladder.csv", index_label="hour")
+        print(f"price ladder: predicted load and PV match the solution in every hour: "
+              f"{bool(ladder['match'].all())} | lambda_t not uniquely determined in hours "
+              f"{ladder.index[~ladder.lambda_unique].tolist()}\n")
 
     if "Q3" in question and results_q2c is not None:
         plot_schedule_q3_comparison(results, results_q2c, data, save_to=out / "schedule.png")

@@ -6,6 +6,7 @@ closed forms with the solver', 'sanity-check before interpreting').
 """
 import numpy as np
 
+from src.analysis import check_price_ladder
 from src.data_loader import load_question
 from src.model import FlexibleConsumerModel, Q2LinearModel, Q2QuadraticModel
 
@@ -92,6 +93,16 @@ def check_q1(case):
     print(f"[{case}] surplus: gurobi {r.objective:.4f} vs brute force {total:.4f} "
           f"(diff {abs(r.objective - total):.2e})")
     assert abs(r.objective - total) < 1e-3
+
+    # (f): the price ladder of (d).ii-iii must reproduce the solution hour by hour, and the
+    # solver's lambda must lie inside the interval the KKT conditions leave for it
+    ladder = check_price_ladder(r, d)
+    inside = ((ladder["lambda"] >= ladder["lambda_lo"] - TOL)
+              & (ladder["lambda"] <= ladder["lambda_hi"] + TOL)).all()
+    print(f"[{case}] price ladder reproduces load and PV in every hour: "
+          f"{bool(ladder['match'].all())} | lambda inside its KKT interval: {bool(inside)}"
+          f" | lambda not unique in {int((~ladder['lambda_unique']).sum())}/24 hours")
+    assert ladder["match"].all() and inside
     return r
 
 

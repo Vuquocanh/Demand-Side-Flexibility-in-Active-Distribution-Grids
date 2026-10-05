@@ -62,6 +62,7 @@ src/
   data_loader.py         load_question("Q1_caseA") -> InputData (all parameters, with units)
   model.py               FlexibleConsumerModel: build() / solve() -> Results (primal + dual values)
   scenarios.py           Helpers that derive sensitivity scenarios from a base InputData
+  analysis.py            Post-solve checks on a Results (price ladder and dual bounds of Q1.f)
   plotting.py            Figures for inputs, optimal schedule, duals and scenario comparisons
 data/
   appliance_params.json  SHARED catalogue: every PV system, flexible load and battery - see Section 4
