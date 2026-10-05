@@ -141,10 +141,10 @@ class FlexibleConsumerModel:
         self.var['load'] = m.addVars(T, lb=-GRB.INFINITY, name='load')
         # PV production
         self.var['pv'] = m.addVars(T, name='pv')
-        self.var['import'] = m.addVars(
-            T, name='import')                # grid import
-        self.var['export'] = m.addVars(
-            T, name='export')                # grid export
+        # grid import
+        self.var['import'] = m.addVars(T, name='import')    
+        # grid export            
+        self.var['export'] = m.addVars(T, name='export')                
 
     def _add_common_constraints(self) -> None:
         """Constraints shared by every question: balance (1b), PV limit (1c), load bounds (1d)-(1e).
