@@ -20,7 +20,8 @@ def run_e_min_sweep(base_data):
         try:
             res = model.solve()
             total_load = res.hourly["load"].sum()
-            mu_daily = res.duals.get("min_daily_energy", 0.0)
+            # \mu^{daily} >= 0
+            mu_daily = abs(res.duals.get("min_daily_energy", 0.0))
 
             # Calculate total deviation: sum((L_t - L_ref_t)^2)
             ref_load = data.reference_load
