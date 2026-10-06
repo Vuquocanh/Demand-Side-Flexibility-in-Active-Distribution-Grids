@@ -252,10 +252,11 @@ def plot_duals_q3(results_q3, data, save_to=None):
     hours = h.index
 
     if "dual_balance" in h.columns:
-        ax.plot(hours, h["dual_balance"], label="dual balance ($\lambda_t$)", color="#1F77B4", linewidth=1.5)
+        # \lambda_t = \pi_t^+ - \mu_t^{imp} > 0
+        ax.plot(hours, h["dual_balance"].abs(), label="dual balance ($\lambda_t$)", color="#1F77B4", linewidth=1.5)
     if "dual_pv_max" in h.columns:
-        ax.plot(hours, h["dual_pv_max"], label="dual pv_max", color="#FF7F0E", linewidth=1.5)
-
+        # \bar{\mu}_t^{PV} >= 0
+        ax.plot(hours, h["dual_pv_max"].abs(), label="dual pv_max", color="#FF7F0E", linewidth=1.5)
     p_imp = data.energy_price + data.import_tariff
     p_exp = data.energy_price - data.export_tariff
     ax.plot(hours, p_imp, linestyle="--", color="gray", alpha=0.6, label="price + import tariff")
@@ -284,6 +285,9 @@ def plot_q3_emin_sensitivity(df_emin: pd.DataFrame, save_to: Path | str = None, 
 
     # left y-axis: mu^daily
     ax1.set_xlabel("Minimum Daily Energy Requirement $E_{\\mathrm{min}}$ (kWh)", fontsize=11)
+    
+    mu_plot = df_emin["mu_daily"].abs()
+    
     ax1.set_ylabel("Dual Variable $\\mu^{\\mathrm{daily}}$ (DKK/kWh)", color=color1, fontsize=11)
     line1 = ax1.step(
         df_emin["E_min"], df_emin["mu_daily"], where="post", color=color1, linewidth=2, label="Dual $\\mu^{\\mathrm{daily}}$"
