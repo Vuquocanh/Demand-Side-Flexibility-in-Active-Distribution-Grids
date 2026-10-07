@@ -4,6 +4,13 @@
     python main.py --question Q2_linear     # another case
     python main.py --scenarios              # also run the example sensitivity scenarios
 
+    ------q3------
+    python main.py --question Q3            # Q3 base case - q3(a)-(e)
+    python main.py --q3-sensitivity         # q3(f)
+    python main.py --compare-soc-modes      # q3(g) i.
+    python main.py --q3-battery             # q3(g) iii&iv.
+    python main.py --q3g-sensitivity        # q3(g) v.
+    
 Results (CSV, TXT, PNG) are written to ``results/<question>/``. Extend ``run_scenarios``
 with your own scenarios, or add a new function per question, as your analysis grows.
 """
