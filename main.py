@@ -13,6 +13,7 @@ import argparse
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 
 from src.data_loader import load_question, list_questions
 from src.model import Results, model_for_case
@@ -21,6 +22,8 @@ from src.plotting import (plot_disutility_sweep, plot_duals, plot_inputs, plot_l
 from src.scenarios import scale_prices, scale_pv, set_disutility, set_tariffs
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
+TOL = 1e-6  # tolerance for "equal to a bound" / "deviates" tests on solver output
 
 
 def run_base_case(question: str, out: Path, show: bool) -> Results | None:
@@ -95,6 +98,7 @@ def _disutility_sweep(case: str, coeff: str, grid, out: Path, xlabel: str,
             "energy_kWh": h["load"].sum(),
             "abs_deviation_kWh": dev.sum(),
             "hours_deviating": int((dev > 1e-6).sum()),
+            "hours_at_bound": _hours_at_bound(h, base),
         })
     df = pd.DataFrame(rows).set_index(coeff)
     stem = "sweep_c_L" if coeff == "linear" else "sweep_c_Q"
@@ -173,6 +177,7 @@ def run_q2d_comparison(out: Path):
             "export_kWh": h["export"].sum(),
             "abs_dev_vs_ref_kWh": dev.sum(),
             "hours_deviating": int((dev > 1e-6).sum()),
+            "hours_at_bound": _hours_at_bound(h, ref_data),
         })
     df = pd.DataFrame(rows).set_index("model")
     out.mkdir(parents=True, exist_ok=True)
@@ -181,6 +186,17 @@ def run_q2d_comparison(out: Path):
     print(df.to_string(float_format=lambda v: f"{v:8.2f}"))
     print(f"\nComparison written to {out}")
     return df
+
+
+def _hours_at_bound(hourly, data) -> int:
+    """Number of hours with a positive reference in which the optimal load sits on a load
+    bound (``load_min`` or ``load_max``) - the "deviation bound" of Question 2.(b).iv, since
+    the hourly load bounds are the only limits on the deviation in this data set. The hours
+    with a zero reference sit on load_min = reference trivially and are not counted."""
+    load = hourly["load"]
+    at_bound = (np.abs(load - data.load_min_kWh) <
+                TOL) | (np.abs(load - data.load_max_kWh) < TOL)
+    return int((at_bound & (data.reference_load > 0)).sum())
 
 
 def main() -> None:
