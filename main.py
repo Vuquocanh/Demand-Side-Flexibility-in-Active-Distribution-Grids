@@ -8,6 +8,12 @@ Results (CSV, TXT, PNG) are written to ``results/<question>/``. Extend ``run_sce
 with your own scenarios, or add a new function per question, as your analysis grows.
 """
 from __future__ import annotations
+from src.q3_model import ModelQ3Battery
+import copy
+from src.model import Q2QuadraticModel
+from src.plotting import plot_q3g_sensitivity
+from src.run_q3_sensitivity import run_e_min_sweep
+from src.q3_model import ModelQ3
 
 import argparse
 from pathlib import Path
@@ -22,10 +28,12 @@ from src.model import Results, model_for_case
 from src.plotting import (plot_disutility_sweep, plot_duals, plot_inputs, plot_load_comparison,
                           plot_scenario_comparison, plot_schedule,
                           plot_schedule_q3_comparison, plot_duals_q3,
-                          plot_q3_emin_sensitivity, plot_q3_cq_profiles,plot_q3_battery_schedule)
+                          plot_q3_emin_sensitivity, plot_q3_cq_profiles, plot_q3_battery_schedule)
 from src.scenarios import scale_prices, scale_pv, set_disutility, set_tariffs
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
+TOL = 1e-6  # tolerance for "equal to a bound" / "deviates" tests on solver output
 
 
 def run_base_case(question: str, out: Path, show: bool) -> Results | None:
@@ -47,7 +55,8 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
         print("--> Q3 question detected, solving Q2.(c) (without E_min constraint) simultaneously for comparison curves...")
         model_q2c = Q2QuadraticModel(data).build()
         results_q2c = model_q2c.solve()
-        print(f"Q2.(c) solved. Unconstrained energy consumption: {results_q2c.hourly['load'].sum():.2f} kWh (Q3 mandatory constraint is {data.min_daily_energy_kWh:.2f} kWh)")
+        print(
+            f"Q2.(c) solved. Unconstrained energy consumption: {results_q2c.hourly['load'].sum():.2f} kWh (Q3 mandatory constraint is {data.min_daily_energy_kWh:.2f} kWh)")
 
     print(results, "\n")
     results.save(out)
@@ -62,7 +71,8 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
               f"{ladder.index[~ladder.lambda_unique].tolist()}\n")
 
     if "Q3" in question and results_q2c is not None:
-        plot_schedule_q3_comparison(results, results_q2c, data, save_to=out / "schedule.png")
+        plot_schedule_q3_comparison(
+            results, results_q2c, data, save_to=out / "schedule.png")
         plot_duals_q3(results, data, save_to=out / "duals.png")
     else:
         plot_schedule(results, data, save_to=out / "schedule.png")
@@ -123,6 +133,7 @@ def _disutility_sweep(case: str, coeff: str, grid, out: Path, xlabel: str,
             "energy_kWh": h["load"].sum(),
             "abs_deviation_kWh": dev.sum(),
             "hours_deviating": int((dev > 1e-6).sum()),
+            "hours_at_bound": _hours_at_bound(h, base),
         })
     df = pd.DataFrame(rows).set_index(coeff)
     stem = "sweep_c_L" if coeff == "linear" else "sweep_c_Q"
@@ -147,7 +158,7 @@ def run_q2b_sweep(out: Path):
     import numpy as np
     base = load_question('Q2_linear')
     grid = np.round(np.arange(0.05, (base.energy_price +
-                                    base.import_tariff).max() + 0.35, 0.05), 2)
+                                     base.import_tariff).max() + 0.35, 0.05), 2)
     return _disutility_sweep('Q2_linear', 'linear', grid, out, xlabel='c_L [DKK/kWh]')
 
 
@@ -201,6 +212,7 @@ def run_q2d_comparison(out: Path):
             "export_kWh": h["export"].sum(),
             "abs_dev_vs_ref_kWh": dev.sum(),
             "hours_deviating": int((dev > 1e-6).sum()),
+            "hours_at_bound": _hours_at_bound(h, ref_data),
         })
     df = pd.DataFrame(rows).set_index("model")
     out.mkdir(parents=True, exist_ok=True)
@@ -210,26 +222,24 @@ def run_q2d_comparison(out: Path):
     print(f"\nComparison written to {out}")
     return df
 
-from src.model import Q2QuadraticModel
-from src.q3_model import ModelQ3
 
 def run_q3_analysis(question: str = "Q3_base", out: Path = RESULTS_DIR / "Q3_base"):
     out.mkdir(parents=True, exist_ok=True)
     data = load_question(question)
-    
+
     res_q2c = Q2QuadraticModel(data).build().solve()
-    
+
     res_q3 = ModelQ3(data).build().solve()
-    
+
     res_q3.save(out)
 
-    plot_schedule_q3_comparison(res_q3, res_q2c, data, save_to=out / "schedule.png")
+    plot_schedule_q3_comparison(
+        res_q3, res_q2c, data, save_to=out / "schedule.png")
     plot_duals_q3(res_q3, data, save_to=out / "duals.png")
-    
+
     print(f"Q3 analysis completed, figures saved to: {out}")
 
-import copy
-from src.run_q3_sensitivity import run_e_min_sweep
+
 def run_q3_sensitivity_analysis(question: str = "Q3_base", out: Path = RESULTS_DIR / "Q3_sensitivity"):
     """Runs E_min and c_Q sensitivity analysis for Q3 and outputs figures to results/."""
     out.mkdir(parents=True, exist_ok=True)
@@ -249,26 +259,28 @@ def run_q3_sensitivity_analysis(question: str = "Q3_base", out: Path = RESULTS_D
         res = ModelQ3(data).build().solve()
         cq_results[cq] = res.hourly
 
-    plot_q3_cq_profiles(cq_results, base_data, save_to=out / "cq_load_profiles.png")
+    plot_q3_cq_profiles(cq_results, base_data,
+                        save_to=out / "cq_load_profiles.png")
     print(f"\nQ3 Sensitivity Analysis complete! Outputs written to: {out}")
 
-from src.q3_model import ModelQ3Battery
 
 def run_q3_battery_base(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3_battery"):
     """Runs the base case analysis for Q3 with battery storage (default: Option A)."""
     out.mkdir(parents=True, exist_ok=True)
     data = load_question(question)
-    
+
     model = ModelQ3Battery(data, end_soc_mode="constraint").build()
     results = model.solve()
     # -------------------------------------------------------
-    
+
     results.save(out)
-    print(f"Q3 Battery Base Case Solved! Total Cost: {results.objective:.2f} DKK")
-    
-    
-    plot_q3_battery_schedule(results, data, save_to=out / "battery_schedule.png")
+    print(
+        f"Q3 Battery Base Case Solved! Total Cost: {results.objective:.2f} DKK")
+
+    plot_q3_battery_schedule(
+        results, data, save_to=out / "battery_schedule.png")
     return results
+
 
 def run_q3g_soc_comparison(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3g_soc_comparison"):
     """Runs the comparison experiment for Q3.(g).i: Option A vs Option B vs Free mode."""
@@ -276,7 +288,7 @@ def run_q3g_soc_comparison(question: str = "Q3_battery", out: Path = RESULTS_DIR
     data = load_question(question)
 
     print("--> Running Q3.(g).i End-of-Horizon SoC Strategy Comparison...")
-    
+
     # Option A: Constraint mode (SoC_24 >= SoC_0)
     res_a = ModelQ3Battery(data, end_soc_mode="constraint").build().solve()
 
@@ -287,18 +299,20 @@ def run_q3g_soc_comparison(question: str = "Q3_battery", out: Path = RESULTS_DIR
     res_free = ModelQ3Battery(data, end_soc_mode="free").build().solve()
     # -------------------------------------------------------
 
-    print(f"Option A (Constraint) : End SoC = {res_a.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_a.objective:.2f} DKK")
-    print(f"Option B (Valuation)  : End SoC = {res_b.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_b.objective:.2f} DKK")
-    print(f"Option Free           : End SoC = {res_free.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_free.objective:.2f} DKK")
+    print(
+        f"Option A (Constraint) : End SoC = {res_a.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_a.objective:.2f} DKK")
+    print(
+        f"Option B (Valuation)  : End SoC = {res_b.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_b.objective:.2f} DKK")
+    print(
+        f"Option Free           : End SoC = {res_free.hourly['soc'].iloc[-1]:.2f} kWh | Cost = {res_free.objective:.2f} DKK")
 
     res_a.save(out, tag="OptionA_Constraint")
     res_b.save(out, tag="OptionB_Valuation")
     res_free.save(out, tag="Free")
-    
+
     return {"Option A": res_a, "Option B": res_b, "Free": res_free}
 
-import pandas as pd
-from src.plotting import plot_q3g_sensitivity
+
 def run_q3g_sensitivity_analysis(question: str = "Q3_battery", out: Path = RESULTS_DIR / "Q3g_sensitivity"):
     out.mkdir(parents=True, exist_ok=True)
     base_data = load_question(question)
@@ -308,17 +322,18 @@ def run_q3g_sensitivity_analysis(question: str = "Q3_battery", out: Path = RESUL
     # 1. Sweep Environment Parameter: Price Spread Scale
     spread_scales = [0.0, 0.5, 1.0, 1.5, 2.0]
     results_spread = []
-    
+
     for scale in spread_scales:
         data = copy.deepcopy(base_data)
         p_mean = data.energy_price.mean()
         data.energy_price = p_mean + scale * (data.energy_price - p_mean)
-        
+
         # Base model without battery
         cost_no_bat = ModelQ3(data).build().solve().objective
         # Model with battery
-        cost_with_bat = ModelQ3Battery(data, end_soc_mode="constraint").build().solve().objective
-        
+        cost_with_bat = ModelQ3Battery(
+            data, end_soc_mode="constraint").build().solve().objective
+
         v_bat = cost_no_bat - cost_with_bat
         results_spread.append({
             "price_spread_scale": scale,
@@ -339,19 +354,20 @@ def run_q3g_sensitivity_analysis(question: str = "Q3_battery", out: Path = RESUL
         if (base_data.battery_capacity_kWh and base_data.battery_capacity_kWh > 0)
         else 0.5
     )
-    
+
     # Baseline without battery on unscaled base data
     cost_no_bat_base = ModelQ3(base_data).build().solve().objective
-    
+
     for cap in capacities:
         data = copy.deepcopy(base_data)
         data.battery_capacity_kWh = cap
 
         data.battery_initial_soc_kWh = cap * soc_ratio
 
-        cost_with_bat = ModelQ3Battery(data, end_soc_mode="constraint").build().solve().objective
+        cost_with_bat = ModelQ3Battery(
+            data, end_soc_mode="constraint").build().solve().objective
         v_bat = cost_no_bat_base - cost_with_bat
-        
+
         results_cap.append({
             "capacity_kWh": cap,
             "cost_with_battery": cost_with_bat,
@@ -361,8 +377,21 @@ def run_q3g_sensitivity_analysis(question: str = "Q3_battery", out: Path = RESUL
     df_cap.to_csv(out / "value_vs_capacity.csv", index=False)
 
     # Plot and save
-    plot_q3g_sensitivity(df_spread, df_cap, save_to=out / "battery_value_sensitivity.png")
+    plot_q3g_sensitivity(df_spread, df_cap, save_to=out /
+                         "battery_value_sensitivity.png")
     print(f"\nQ3.(g).v Analysis complete! Figures and CSVs saved to {out}")
+
+
+def _hours_at_bound(hourly, data) -> int:
+    """Number of hours with a positive reference in which the optimal load sits on a load
+    bound (``load_min`` or ``load_max``) - the "deviation bound" of Question 2.(b).iv, since
+    the hourly load bounds are the only limits on the deviation in this data set. The hours
+    with a zero reference sit on load_min = reference trivially and are not counted."""
+    load = hourly["load"]
+    at_bound = (np.abs(load - data.load_min_kWh) <
+                TOL) | (np.abs(load - data.load_max_kWh) < TOL)
+    return int((at_bound & (data.reference_load > 0)).sum())
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -386,7 +415,7 @@ def main() -> None:
     parser.add_argument("--compare-soc-modes", action="store_true",
                         help="run Q3.(g).i comparison across end-of-horizon SoC modes")
     parser.add_argument("--q3g-sensitivity", action="store_true",
-                    help="run Q3.(g).v battery value sensitivity analysis")
+                        help="run Q3.(g).v battery value sensitivity analysis")
     args = parser.parse_args()
 
     out = RESULTS_DIR / args.question
@@ -426,6 +455,7 @@ def main() -> None:
     if args.q3g_sensitivity:
         run_q3g_sensitivity_analysis(question="Q3_battery")
         return
-    
+
+
 if __name__ == "__main__":
     main()

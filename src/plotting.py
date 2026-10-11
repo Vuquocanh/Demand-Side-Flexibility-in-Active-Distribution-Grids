@@ -136,10 +136,17 @@ def plot_disutility_sweep(
     ax1b = ax1.twinx()
     ax1b.plot(x, df["hours_deviating"], ".-",
               color="C1", label="# deviating hours")
+    if "hours_at_bound" in df:
+        ax1b.plot(x, df["hours_at_bound"], "x--",
+                  color="C3", label="# hours stopped by a load bound")
+    n_hours = int(max(df["hours_deviating"].max(), 1))
+    # fixed 0..14 scale: a flat line reads as "14 of 14"
+    ax1b.set_ylim(-0.5, n_hours + 0.5)
+    ax1b.set_yticks(range(0, n_hours + 1, 2))
     ax1b.set_ylabel("hours", color="C1")
     lines, labels = ax1.get_legend_handles_labels()
     l2, lb2 = ax1b.get_legend_handles_labels()
-    ax1.legend(lines + l2, labels + lb2, fontsize=8, loc="upper right")
+    ax1.legend(lines + l2, labels + lb2, fontsize=8, loc="center right")
     title = "Sweep of the disutility coefficient"
     if len(np.atleast_1d(price_import)) or len(np.atleast_1d(price_export)):
         title += " (grey lines: hourly effective prices)"
