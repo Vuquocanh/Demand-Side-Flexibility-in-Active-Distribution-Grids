@@ -305,27 +305,28 @@ def plot_q3_emin_sensitivity(df_emin: pd.DataFrame, save_to: Path | str = None, 
     ax2.scatter(df_emin["E_min"], df_emin["objective"], color=color2, zorder=5)
     ax2.tick_params(axis="y", labelcolor=color2)
 
-    # Mark Slack Intervals and Binding Intervals
-    slack_mask = df_emin["mu_daily"] == 0
-    if slack_mask.any():
-        knee_point = df_emin[slack_mask]["E_min"].max()
-        ax1.axvline(x=knee_point, color="gray", linestyle=":", linewidth=1.5)
-        ax1.text(
-            knee_point * 0.5,
-            df_emin["mu_daily"].max() * 0.5,
-            "Inactive Zone\n$(\\mu = 0)$",
-            ha="center",
-            va="center",
-            fontsize=10,
-            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8),
-        )
+    
+    inactive_limit = 22.77
+    
+    ax1.axvspan(0, inactive_limit, color="gray", alpha=0.15, label="Inactive Zone")
+    
+    ax1.axvline(x=inactive_limit, color="gray", linestyle=":", linewidth=1.5)
+    
+    ax1.text(
+        inactive_limit / 2,
+        df_emin["mu_daily"].max() * 0.5,
+        "Inactive Zone\n$(\\mu = 0)$",
+        ha="center",
+        va="center",
+        fontsize=10,
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8),
+    )
 
     plt.title("Sensitivity to Minimum Daily Energy Requirement ($E_{\\mathrm{min}}$)", fontsize=12, fontweight="bold")
     fig.tight_layout()
 
     plt.savefig(save_to, dpi=300)
     plt.close()
-
 
 def plot_q3_cq_profiles(cq_results: dict[float, pd.DataFrame], base_data, save_to: Path | str = None, show: bool = False):
     """Q3f:  Monitoring c_Q - 24-hour Load Profile and Electricity Price Comparison
